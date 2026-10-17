@@ -112,6 +112,54 @@ Implementation notes for anyone reproducing:
   iteration 0 (zero ES gradient) — initialize the last layer with
   ~1e-2 noise to break the tie.
 
+## Test 4 — The remaining demo scenes (`test_local/cfwarp_demos.py`)
+
+The scenes test_viewer.py rotates through, run headless with the same
+corrector. One run per scene family:
+
+**LEAP hand + cube** (no keyframe: the cube free-falls from z=0.1 onto
+the palm and settles there in 0.4 s, 10 contacts, W = 1.373 N):
+
+| k    | S    | outcome |
+|------|------|---------|
+| 0    | –    | settles on palm, fz_tail = W, held |
+| 0.25 / 0.5 / 1.0 | 1.3 / 1.0 | identical to k=0 (static hold) |
+| 1.0  | 1.3  | **ESCAPED to 36.07 m** |
+
+Cross-engine escape (final z): mujoco 36.07 / mjwarp 36.04 / comfree
+36.02 — same divergence within 50 mm. The learned residual (test-3
+recipe, ~5 s of ES) holds k=1 at fz = W but in a bounded oscillation
+(z within ±3 cm over 18 s, cv 0.097) and without a contact-loss gate
+(it never needed one — its surplus cancellation keeps contact).
+
+**primitives** (125 free bodies; corrector on one sphere resting on
+the table, W = 5.14 N — no hand at all, the simplest setting):
+k=0 rests on the table; k=1 S=1.0 held (no-op); k=1 S=1.3
+**ESCAPED to 13.33 m** (sphere launched off the table).
+
+**humanoid — architecture mismatch, N/A.** With ctrl=0 the rig
+crumples and the joint springs (knee stiffness 10, damping 5) press
+the body into the floor: steady-state qfrc_constraint[root z] ~=
+400 N = 7×W. The corrector's static target W is then structurally
+wrong: k=1, S=1.3 applies 1.3·57.4 − 400 ≈ **−326 N — it drives the
+humanoid INTO the floor**. The corrector presumes the target equals
+the task's true static support, which equals W only for a
+freely-suspended object; full-body control needs a different target
+model. Reported as a negative result, not an engine bug.
+
+**Engine support probe** — every viewer scene loads and steps on BOTH
+warp engines at nworld=1 (primitives, collision, floppy/FEM-flex,
+hfield, humanoid, n_humanoid, leap, allegro). comfree is consistently
+20-30% faster than mjwarp at nworld=1 (humanoid 715 vs 512 steps/s;
+primitives 408 vs 23 — mjwarp struggles with 125 free bodies).
+
+**n_humanoid throughput** (48 bodies, device-resident, 100 steps):
+
+| nworld | mjwarp | comfree |
+|--------|--------|---------|
+| 64     | 15 769 world-steps/s | 25 339 |
+| 256    | 60 871 | **102 637 (1.7x)** |
+
 ## Conclusions
 
 1. **A static, imperfect target (S≠1) at full authority (k=1) is
@@ -130,6 +178,12 @@ Implementation notes for anyone reproducing:
    ES on the same scene turns the k=1 + wrong-prior 43.7 m divergence
    into a stable hold; a residual trained on a different scene does
    not transfer (zero-shot still escapes).
+5. **The same physics in every demo scene** (test 4): LEAP 36 m,
+   primitives 13 m — a constant surplus force at full authority
+   ejects any loosely-supported object, hand or no hand. The one
+   scene where the architecture does NOT map is full-body control
+   (humanoid): the static target W is structurally wrong when the
+   task's real support force is not W (spring pre-load, 7×W).
 
 ## Repro
 
@@ -139,6 +193,9 @@ Implementation notes for anyone reproducing:
     python test_local/cfwarp_neural_allegro.py --engine mjwarp   # full CPU matrix by default
     # test 3 (needs torch):
     python test_local/cfwarp_neural_allegro_train.py
+    # test 4 (demo scenes):
+    python test_local/cfwarp_demos.py leap          # full k x S matrix
+    python test_local/cfwarp_demos.py leap --engine comfree
 
 (These runners import the repo's benchmark logic read-only; nothing in
 the repo itself is modified by a run.)
