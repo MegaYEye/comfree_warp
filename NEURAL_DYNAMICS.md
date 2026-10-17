@@ -67,6 +67,51 @@ test 1: looser grip); its corrector rows match its own baseline.
 mjwarp k=0 matches CPU within 0.02 mm. GPU nworld=1 throughput
 ~225–260 steps/s is host↔device sync bound (per-step Python loop).
 
+## Test 3 — Learned residual on the Allegro scene (`test_local/cfwarp_neural_allegro_train.py`, needs torch)
+
+Does learning improve on the static prior? The target becomes
+
+    F_target = S*W + MLP(ncon, mean_pen_mm, max_pen_mm)     (3-32-32-1)
+
+trained ON TASK at k=1 against the deliberately wrong prior (S=1.3) by
+antithetic REINFORCE ES (Adam 2e-3, sigma 0.4 -> 0.2 -> 0.1, 60+30+30
+iterations, ~10 s on CPU) on the rollout cost
+
+    J = cv_tail + 3*|bias_tail|/W + 0.02*|drift_mm| + 0.3*pen_max_tail
+
+The penetration term is essential here: in a STATIC grasp Newton
+forces fz_total = W for ANY constant applied force, so the bias term
+alone cannot distinguish the correct target from a "press harder"
+cheat; penalizing penetration depth can.
+
+| target                        | drift      | outcome |
+|-------------------------------|------------|---------|
+| k=0 solver only               | +0.1 mm    | held |
+| k=1 static 1.3W               | +43 649 mm | ESCAPED 43.702 m |
+| k=1 static 1.0W (oracle)      | +0.2 mm    | held |
+| k=1 learned, foreign checkpoint (zero-shot) | +43 578 mm | ESCAPED — the residual is task-specific |
+| k=1 learned (on-task)         | +3.5 mm    | held, fz 3.37 N (W 3.365), cv 0.006 |
+| k=1 learned (on-task, 12 s)   | +3.5 mm    | held, cv 0.010 |
+| k=0.5 learned (on-task)       | +0.6 mm    | held |
+
+What the residual learned (F_target = 1.3W + r(g)):
+- during contact (ncon 6, pen 0.7 mm): r = -0.78 N -> target 3.595 N
+  ~= W — it cancels the 0.3W surplus that causes the escape;
+- deeper penetration -> lower target (2.876 N at pen 2 mm): negative
+  feedback on squeeze depth, the "press harder" cheat closed off;
+- contact-loss gate direction learned but weak (r = -0.20 at ncon=0):
+  the exact mechanism of the 43.7 m runaway is a target that keeps
+  pushing after contact is lost; here the gate never triggers because
+  the surplus is cancelled before contact can drop.
+
+Implementation notes for anyone reproducing:
+- best-tracking must save the params ACTUALLY evaluated (theta +-
+  sigma*eps), not the center — hold/escape is bistable and the center
+  can escape while a scored neighbour holds;
+- zero-init last layer + deterministic sim makes J+ == J- exactly at
+  iteration 0 (zero ES gradient) — initialize the last layer with
+  ~1e-2 noise to break the tie.
+
 ## Conclusions
 
 1. **A static, imperfect target (S≠1) at full authority (k=1) is
@@ -81,6 +126,10 @@ mjwarp k=0 matches CPU within 0.02 mm. GPU nworld=1 throughput
    incomplete model — the fix is in the TARGET (inertia term, learned
    residual), not the engine. Same conclusion as the bowl-grasp study
    in bigrasp_dp (see NOTES_cfwarp_corrector.md there).
+4. **A learned residual fixes it, but only on-task** (test 3): 10 s of
+   ES on the same scene turns the k=1 + wrong-prior 43.7 m divergence
+   into a stable hold; a residual trained on a different scene does
+   not transfer (zero-shot still escapes).
 
 ## Repro
 
@@ -88,6 +137,8 @@ mjwarp k=0 matches CPU within 0.02 mm. GPU nworld=1 throughput
     export COMFREE_WARP_ROOT=$(pwd)
     python test_local/cfwarp_neural_grasp.py --engine mujoco --k 1.0 --prior-scale 1.3
     python test_local/cfwarp_neural_allegro.py --engine mjwarp   # full CPU matrix by default
+    # test 3 (needs torch):
+    python test_local/cfwarp_neural_allegro_train.py
 
 (These runners import the repo's benchmark logic read-only; nothing in
 the repo itself is modified by a run.)
